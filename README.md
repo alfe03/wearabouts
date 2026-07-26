@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Dijital Gardırop
 
-## Getting Started
+iPhone'da Expo Go ile çalışacak kişisel dijital gardırop uygulaması. Uygulama web/PWA değildir; React Native bileşenleriyle mobil çalışır.
 
-First, run the development server:
+Bu ilk sürümde backend, kullanıcı hesabı, bulut veritabanı, AI, fotoğraf yükleme, seyahat ve bavul özellikleri yoktur. Veriler telefondaki yerel AsyncStorage alanında saklanır.
+
+## Kurulum
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## iPhone'da Çalıştırma
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm start
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Terminalde çıkan QR kodunu iPhone'daki Expo Go uygulamasıyla okutun. Bilgisayar ve telefon aynı Wi-Fi ağında olmalıdır. Ağ sorununda Expo arayüzünden `Tunnel` modunu seçebilirsiniz.
 
-## Learn More
+## Kontroller
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run typecheck
+npm run lint
+npm run test
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Temel Özellikler
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Gardırop oluşturma ve listeleme
+- Toplam gardırop ve kıyafet sayıları
+- Gardırop detayında kıyafet kartları
+- Manuel kıyafet ekleme
+- Kıyafet görüntüleme, düzenleme, başka gardıroba taşıma ve onaylı silme
+- Telefonda kalıcı yerel saklama
 
-## Deploy on Vercel
+## Veri Modeli
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Ana varlıklar:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `Wardrobe`: id, ad, açıklama, oluşturulma ve güncellenme tarihleri
+- `ClothingItem`: id, wardrobeId, ad, kategori, tür, ana renk, marka, not, ileride fotoğraf için opsiyonel alan, dataSource, oluşturulma ve güncellenme tarihleri
+
+Kıyafet id'si gardıroptan bağımsızdır. İleride bavul kayıtları kıyafetleri bu id ile referanslayabilir; kıyafeti bavula eklemek gardırop kaydını silmek anlamına gelmez.
+
+## Notlar
+
+Expo SDK 57 kullanılır. Yerel veri için `@react-native-async-storage/async-storage`, doğrulama için `zod`, birim testleri için `vitest` kullanılır.
