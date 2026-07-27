@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Image,
   Platform,
   Pressable,
   ScrollView,
@@ -10,13 +11,23 @@ import {
   Text,
   TextInput,
   View,
+  type KeyboardTypeOptions,
 } from "react-native";
+import * as ImagePicker from "expo-image-picker";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { analyzeClothingPhoto } from "@/lib/clothing-analysis";
 import {
   colorToSwatch,
   countItemsByWardrobe,
   formatDateTime,
 } from "@/lib/data-utils";
+import { persistClothingPhoto } from "@/lib/photo-storage";
+import {
+  clearLocalUserSession,
+  getLocalUserSession,
+  registerLocalUserSession,
+  signInLocalUserSession,
+} from "@/lib/storage/user-session";
 import {
   createClothingItemRecord,
   createWardrobeRecord,
@@ -26,10 +37,22 @@ import {
   updateClothingItemRecord,
 } from "@/lib/storage/database";
 import { clothingCategories } from "@/lib/types";
-import type { ClothingCategory, ClothingItem, Wardrobe } from "@/lib/types";
+import type {
+  ClothingCategory,
+  ClothingDataSource,
+  ClothingImageInfo,
+  ClothingItem,
+  ClothingItemInput,
+  LocalUser,
+  LocalUserLoginInput,
+  LocalUserRegistrationInput,
+  Wardrobe,
+} from "@/lib/types";
 import {
   clothingItemFormSchema,
   type FieldErrors,
+  localUserLoginFormSchema,
+  localUserRegistrationFormSchema,
   wardrobeFormSchema,
   zodIssuesToFieldErrors,
 } from "@/lib/validation";
@@ -52,6 +75,8 @@ type ClothingFormState = {
   notes: string;
 };
 
+type ClothingFormInput = Omit<ClothingItemInput, "userId">;
+
 const emptyClothingForm: ClothingFormState = {
   wardrobeId: "",
   name: "",
@@ -64,6 +89,7 @@ const emptyClothingForm: ClothingFormState = {
 
 export function WardrobeApp() {
   const [screen, setScreen] = useState<Screen>({ name: "home" });
+  const [user, setUser] = useState<LocalUser | undefined>();
   const [wardrobes, setWardrobes] = useState<Wardrobe[]>([]);
   const [items, setItems] = useState<ClothingItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -71,10 +97,14 @@ export function WardrobeApp() {
 
   const loadData = useCallback(async () => {
     try {
-      const [wardrobeRecords, itemRecords] = await Promise.all([
-        listWardrobes(),
-        listClothingItems(),
-      ]);
+      const userRecord = await getLocalUserSession();
+      const [wardrobeRecords, itemRecords] = userRecord
+        ? await Promise.all([
+            listWardrobes(userRecord.id),
+            listClothingItems(userRecord.id),
+          ])
+        : [[], []];
+      setUser(userRecord);
       setWardrobes(wardrobeRecords);
       setItems(itemRecords);
       setLoadError(null);
@@ -95,8 +125,41 @@ export function WardrobeApp() {
 
   const itemCounts = useMemo(() => countItemsByWardrobe(items), [items]);
 
+  function requireSignedInUser() {
+    if (!user) {
+      throw new Error("Kullanıcı oturumu bulunamadı.");
+    }
+
+    return user;
+  }
+
+  async function signIn(input: LocalUserLoginInput) {
+    const nextUser = await signInLocalUserSession(input);
+    setUser(nextUser);
+    setScreen({ name: "home" });
+    setIsLoading(true);
+    await loadData();
+  }
+
+  async function register(input: LocalUserRegistrationInput) {
+    const nextUser = await registerLocalUserSession(input);
+    setUser(nextUser);
+    setScreen({ name: "home" });
+    setIsLoading(true);
+    await loadData();
+  }
+
+  async function signOut() {
+    await clearLocalUserSession();
+    setUser(undefined);
+    setWardrobes([]);
+    setItems([]);
+    setScreen({ name: "home" });
+  }
+
   async function saveWardrobe(input: { name: string; description?: string }) {
-    const wardrobe = await createWardrobeRecord(input);
+    const currentUser = requireSignedInUser();
+    const wardrobe = await createWardrobeRecord({ ...input, userId: currentUser.id });
     await loadData();
     setScreen({
       name: "wardrobeDetail",
@@ -105,16 +168,12 @@ export function WardrobeApp() {
     });
   }
 
-  async function saveClothingItem(input: {
-    wardrobeId: string;
-    name: string;
-    category: ClothingCategory;
-    type: string;
-    primaryColor: string;
-    brand?: string;
-    notes?: string;
-  }) {
-    const item = await createClothingItemRecord(input);
+  async function saveClothingItem(input: ClothingFormInput) {
+    const currentUser = requireSignedInUser();
+    const item = await createClothingItemRecord({
+      ...input,
+      userId: currentUser.id,
+    });
     await loadData();
     setScreen({
       name: "wardrobeDetail",
@@ -125,17 +184,13 @@ export function WardrobeApp() {
 
   async function updateClothingItem(
     itemId: string,
-    input: {
-      wardrobeId: string;
-      name: string;
-      category: ClothingCategory;
-      type: string;
-      primaryColor: string;
-      brand?: string;
-      notes?: string;
-    },
+    input: ClothingFormInput,
   ) {
-    const item = await updateClothingItemRecord(itemId, input);
+    const currentUser = requireSignedInUser();
+    const item = await updateClothingItemRecord(itemId, {
+      ...input,
+      userId: currentUser.id,
+    });
     await loadData();
     setScreen({
       name: "itemDetail",
@@ -145,7 +200,8 @@ export function WardrobeApp() {
   }
 
   async function deleteItem(item: ClothingItem) {
-    await deleteClothingItemRecord(item.id);
+    const currentUser = requireSignedInUser();
+    await deleteClothingItemRecord(currentUser.id, item.id);
     await loadData();
     setScreen({
       name: "wardrobeDetail",
@@ -176,6 +232,14 @@ export function WardrobeApp() {
     );
   }
 
+  if (!user) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <LoginScreen onRegister={register} onSignIn={signIn} />
+      </SafeAreaView>
+    );
+  }
+
   const activeWardrobe =
     "wardrobeId" in screen
       ? wardrobes.find((wardrobe) => wardrobe.id === screen.wardrobeId)
@@ -193,6 +257,10 @@ export function WardrobeApp() {
           onOpenWardrobe={(wardrobeId) =>
             setScreen({ name: "wardrobeDetail", wardrobeId })
           }
+          onSignOut={() => {
+            void signOut();
+          }}
+          user={user}
           wardrobes={wardrobes}
         />
       ) : null}
@@ -261,21 +329,181 @@ export function WardrobeApp() {
   );
 }
 
+function LoginScreen({
+  onSignIn,
+  onRegister,
+}: {
+  onSignIn: (input: LocalUserLoginInput) => Promise<void>;
+  onRegister: (input: LocalUserRegistrationInput) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+
+  async function submit() {
+    setErrors({});
+    setFormError(null);
+    setIsSigningIn(true);
+
+    try {
+      if (mode === "login") {
+        const result = localUserLoginFormSchema.safeParse({ email, password });
+
+        if (!result.success) {
+          setErrors(zodIssuesToFieldErrors(result.error));
+          setIsSigningIn(false);
+          return;
+        }
+
+        await onSignIn(result.data);
+      } else {
+        const result = localUserRegistrationFormSchema.safeParse({
+          name,
+          email,
+          password,
+          passwordConfirmation,
+        });
+
+        if (!result.success) {
+          setErrors(zodIssuesToFieldErrors(result.error));
+          setIsSigningIn(false);
+          return;
+        }
+
+        await onRegister(result.data);
+      }
+    } catch (error) {
+      setFormError(
+        error instanceof Error
+          ? error.message
+          : "İşlem tamamlanamadı. Lütfen tekrar deneyin.",
+      );
+      setIsSigningIn(false);
+    }
+  }
+
+  function switchMode(nextMode: "login" | "register") {
+    setMode(nextMode);
+    setErrors({});
+    setFormError(null);
+  }
+
+  return (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      style={styles.flex}
+    >
+      <ScrollView contentContainerStyle={styles.screen} style={styles.flex}>
+        <View style={styles.loginHero}>
+          <Text style={styles.eyebrow}>Yerel profil</Text>
+          <Text style={styles.title}>Dijital Gardırop</Text>
+          <Text style={styles.description}>
+            Her profil kendi gardıroplarını bu cihazda ayrı tutar.
+          </Text>
+        </View>
+
+        <View style={styles.segmentedControl}>
+          <SegmentButton
+            label="Giriş"
+            onPress={() => switchMode("login")}
+            selected={mode === "login"}
+          />
+          <SegmentButton
+            label="Yeni profil"
+            onPress={() => switchMode("register")}
+            selected={mode === "register"}
+          />
+        </View>
+
+        {formError ? <StatusMessage tone="error" text={formError} /> : null}
+
+        {mode === "register" ? (
+          <Field
+            error={errors.name}
+            label="Ad"
+            onChangeText={setName}
+            placeholder="Cemil"
+            value={name}
+          />
+        ) : null}
+        <Field
+          autoCapitalize="none"
+          error={errors.email}
+          keyboardType="email-address"
+          label="E-posta"
+          onChangeText={setEmail}
+          placeholder="cemil@example.com"
+          value={email}
+        />
+        <Field
+          autoCapitalize="none"
+          error={errors.password}
+          label="Şifre"
+          onChangeText={setPassword}
+          placeholder="En az 6 karakter"
+          secureTextEntry
+          value={password}
+        />
+        {mode === "register" ? (
+          <Field
+            autoCapitalize="none"
+            error={errors.passwordConfirmation}
+            label="Şifre tekrar"
+            onChangeText={setPasswordConfirmation}
+            placeholder="Şifrenizi tekrar girin"
+            secureTextEntry
+            value={passwordConfirmation}
+          />
+        ) : null}
+
+        <Button
+          disabled={isSigningIn}
+          label={
+            isSigningIn
+              ? "İşleniyor..."
+              : mode === "login"
+                ? "Giriş yap"
+                : "Profili oluştur"
+          }
+          onPress={submit}
+        />
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+}
+
 function HomeScreen({
   wardrobes,
   items,
   itemCounts,
+  user,
   onCreateWardrobe,
   onOpenWardrobe,
+  onSignOut,
 }: {
   wardrobes: Wardrobe[];
   items: ClothingItem[];
   itemCounts: Map<string, number>;
+  user: LocalUser;
   onCreateWardrobe: () => void;
   onOpenWardrobe: (wardrobeId: string) => void;
+  onSignOut: () => void;
 }) {
   return (
-    <ScrollView contentContainerStyle={styles.screen}>
+    <ScrollView contentContainerStyle={styles.screen} style={styles.flex}>
+      <View style={styles.userBar}>
+        <View style={styles.flex}>
+          <Text style={styles.smallText}>Oturum</Text>
+          <Text style={styles.userName}>{user.name}</Text>
+        </View>
+        <SecondaryButton label="Çıkış" onPress={onSignOut} />
+      </View>
+
       <Text style={styles.eyebrow}>Kişisel takip</Text>
       <Text style={styles.title}>Dijital Gardırop</Text>
       <Text style={styles.description}>
@@ -368,7 +596,7 @@ function WardrobeFormScreen({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       style={styles.flex}
     >
-      <ScrollView contentContainerStyle={styles.screen}>
+      <ScrollView contentContainerStyle={styles.screen} style={styles.flex}>
         <BackButton label="Ana sayfaya dön" onPress={onCancel} />
         <Text style={styles.eyebrow}>Yeni kayıt</Text>
         <Text style={styles.title}>Gardırop oluştur</Text>
@@ -423,7 +651,7 @@ function WardrobeDetailScreen({
   onOpenItem: (itemId: string) => void;
 }) {
   return (
-    <ScrollView contentContainerStyle={styles.screen}>
+    <ScrollView contentContainerStyle={styles.screen} style={styles.flex}>
       <BackButton label="Tüm gardıroplar" onPress={onBack} />
       <Text style={styles.eyebrow}>Gardırop detayı</Text>
       <Text style={styles.title}>{wardrobe.name}</Text>
@@ -439,8 +667,10 @@ function WardrobeDetailScreen({
       <Button label="Kıyafet ekle" onPress={onCreateItem} />
 
       <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Bu gardıroptaki kıyafetler</Text>
-        <Text style={styles.smallText}>{items.length} kayıt</Text>
+        <Text style={[styles.sectionTitle, styles.flex]}>
+          Bu gardıroptaki kıyafetler
+        </Text>
+        <Text style={styles.countText}>{items.length} kayıt</Text>
       </View>
 
       {items.length === 0 ? (
@@ -459,11 +689,25 @@ function WardrobeDetailScreen({
               onPress={() => onOpenItem(item.id)}
               style={({ pressed }) => [styles.card, pressed && styles.pressed]}
             >
-              <Text style={styles.eyebrow}>{item.category}</Text>
-              <Text style={styles.cardTitle}>{item.name}</Text>
-              <Text style={styles.cardText}>Tür: {item.type}</Text>
-              <Text style={styles.cardText}>Marka: {item.brand ?? "Belirtilmedi"}</Text>
-              <ColorRow color={item.primaryColor} />
+              <View style={styles.itemCardHeader}>
+                {item.image ? (
+                  <Image
+                    accessibilityLabel={`${item.name} fotoğrafı`}
+                    resizeMode="cover"
+                    source={{ uri: item.image.uri }}
+                    style={styles.thumbnail}
+                  />
+                ) : null}
+                <View style={styles.flex}>
+                  <Text style={styles.eyebrow}>{item.category}</Text>
+                  <Text style={styles.cardTitle}>{item.name}</Text>
+                  <Text style={styles.cardText}>Tür: {item.type}</Text>
+                  <Text style={styles.cardText}>
+                    Marka: {item.brand ?? "Belirtilmedi"}
+                  </Text>
+                  <ColorRow color={item.primaryColor} />
+                </View>
+              </View>
               <Text style={styles.linkText}>Görüntüle</Text>
             </Pressable>
           ))}
@@ -487,24 +731,8 @@ function ClothingFormScreen({
   initialWardrobeId?: string;
   existingItem?: ClothingItem;
   onCancel: () => void;
-  onSave?: (input: {
-    wardrobeId: string;
-    name: string;
-    category: ClothingCategory;
-    type: string;
-    primaryColor: string;
-    brand?: string;
-    notes?: string;
-  }) => Promise<void>;
-  onUpdate?: (input: {
-    wardrobeId: string;
-    name: string;
-    category: ClothingCategory;
-    type: string;
-    primaryColor: string;
-    brand?: string;
-    notes?: string;
-  }) => Promise<void>;
+  onSave?: (input: ClothingFormInput) => Promise<void>;
+  onUpdate?: (input: ClothingFormInput) => Promise<void>;
 }) {
   const [form, setForm] = useState<ClothingFormState>({
     ...emptyClothingForm,
@@ -516,8 +744,16 @@ function ClothingFormScreen({
     brand: existingItem?.brand ?? "",
     notes: existingItem?.notes ?? "",
   });
+  const [photo, setPhoto] = useState<ClothingImageInfo | undefined>(
+    existingItem?.image,
+  );
+  const [dataSource, setDataSource] = useState<ClothingDataSource>(
+    existingItem?.dataSource ?? "manual",
+  );
+  const [analysisStatus, setAnalysisStatus] = useState<string | null>(null);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   function setField<Key extends keyof ClothingFormState>(
@@ -525,6 +761,86 @@ function ClothingFormScreen({
     value: ClothingFormState[Key],
   ) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyAnalysisSuggestion(
+    suggestion: Awaited<ReturnType<typeof analyzeClothingPhoto>>,
+  ) {
+    setForm((current) => ({
+      ...current,
+      name: suggestion.name ?? current.name,
+      category: suggestion.category,
+      type: suggestion.type,
+      primaryColor: suggestion.primaryColor,
+      brand: suggestion.brand ?? "",
+      notes: current.notes || suggestion.notes || "",
+    }));
+    setDataSource("ai");
+    setAnalysisStatus("Fotoğraf analizi forma uygulandı. Kaydetmeden önce düzenleyebilirsiniz.");
+  }
+
+  async function analyzePhoto(image: ClothingImageInfo) {
+    setIsAnalyzing(true);
+    setFormError(null);
+    setAnalysisStatus(null);
+
+    try {
+      applyAnalysisSuggestion(await analyzeClothingPhoto(image));
+    } catch (error) {
+      setDataSource("manual");
+      setFormError(
+        error instanceof Error
+          ? error.message
+          : "Fotoğraf analizi tamamlanamadı. Alanları manuel doldurabilirsiniz.",
+      );
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }
+
+  async function pickPhoto(source: NonNullable<ClothingImageInfo["source"]>) {
+    setFormError(null);
+
+    try {
+      const permission =
+        source === "camera"
+          ? await ImagePicker.requestCameraPermissionsAsync()
+          : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        setFormError(
+          source === "camera"
+            ? "Kamera izni verilmedi. Fotoğraf çekmek için izin gerekiyor."
+            : "Fotoğraf izni verilmedi. Galeriden seçim yapmak için izin gerekiyor.",
+        );
+        return;
+      }
+
+      const result =
+        source === "camera"
+          ? await ImagePicker.launchCameraAsync({
+              allowsEditing: true,
+              mediaTypes: ["images"],
+              quality: 0.72,
+            })
+          : await ImagePicker.launchImageLibraryAsync({
+              allowsEditing: true,
+              mediaTypes: ["images"],
+              quality: 0.72,
+            });
+
+      if (result.canceled || !result.assets[0]) {
+        return;
+      }
+
+      const savedPhoto = await persistClothingPhoto(result.assets[0], source);
+      setPhoto(savedPhoto);
+      setDataSource("manual");
+      await analyzePhoto(savedPhoto);
+    } catch {
+      setDataSource("manual");
+      setFormError("Fotoğraf alınamadı. Lütfen tekrar deneyin.");
+    }
   }
 
   async function submit() {
@@ -540,10 +856,16 @@ function ClothingFormScreen({
     setIsSaving(true);
 
     try {
+      const input: ClothingFormInput = {
+        ...result.data,
+        dataSource,
+        image: photo,
+      };
+
       if (mode === "edit" && onUpdate) {
-        await onUpdate(result.data);
+        await onUpdate(input);
       } else if (onSave) {
-        await onSave(result.data);
+        await onSave(input);
       }
     } catch {
       setFormError("Kıyafet kaydedilemedi. Lütfen tekrar deneyin.");
@@ -556,7 +878,7 @@ function ClothingFormScreen({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       style={styles.flex}
     >
-      <ScrollView contentContainerStyle={styles.screen}>
+      <ScrollView contentContainerStyle={styles.screen} style={styles.flex}>
         <BackButton label="Geri dön" onPress={onCancel} />
         <Text style={styles.eyebrow}>
           {mode === "edit" ? "Kıyafet düzenleme" : "Manuel kayıt"}
@@ -565,7 +887,7 @@ function ClothingFormScreen({
           {mode === "edit" ? "Kıyafet bilgilerini düzenle" : "Kıyafet ekle"}
         </Text>
         <Text style={styles.description}>
-          Kayıtlar manuel eklenir ve bu iPhone üzerinde kalıcı olarak saklanır.
+          Fotoğrafla analiz alabilir veya alanları doğrudan doldurabilirsiniz.
         </Text>
 
         {formError ? <StatusMessage tone="error" text={formError} /> : null}
@@ -575,6 +897,48 @@ function ClothingFormScreen({
             text="Gardırop seçimini değiştirerek kıyafeti başka bir gardıroba taşıyabilirsiniz."
           />
         ) : null}
+        {analysisStatus ? <StatusMessage tone="success" text={analysisStatus} /> : null}
+
+        <View style={styles.field}>
+          <Text style={styles.fieldLabel}>Fotoğraf</Text>
+          <View style={styles.photoActions}>
+            <View style={styles.horizontalActionItem}>
+              <SecondaryButton
+                disabled={isAnalyzing || isSaving}
+                label="Kamerayla çek"
+                onPress={() => {
+                  void pickPhoto("camera");
+                }}
+              />
+            </View>
+            <View style={styles.horizontalActionItem}>
+              <SecondaryButton
+                disabled={isAnalyzing || isSaving}
+                label="Galeriden seç"
+                onPress={() => {
+                  void pickPhoto("upload");
+                }}
+              />
+            </View>
+          </View>
+          {photo ? (
+            <View style={styles.photoPreviewPanel}>
+              <Image
+                accessibilityLabel="Seçilen kıyafet fotoğrafı"
+                resizeMode="cover"
+                source={{ uri: photo.uri }}
+                style={styles.photoPreview}
+              />
+              <SecondaryButton
+                disabled={isAnalyzing || isSaving}
+                label={isAnalyzing ? "Analiz ediliyor..." : "Tekrar analiz et"}
+                onPress={() => {
+                  void analyzePhoto(photo);
+                }}
+              />
+            </View>
+          ) : null}
+        </View>
 
         <Field
           error={errors.name}
@@ -693,7 +1057,7 @@ function ItemDetailScreen({
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.screen}>
+    <ScrollView contentContainerStyle={styles.screen} style={styles.flex}>
       <BackButton label="Gardıroba dön" onPress={onBack} />
       <Text style={styles.eyebrow}>Kıyafet detayı</Text>
       <Text style={styles.title}>{item.name}</Text>
@@ -702,14 +1066,26 @@ function ItemDetailScreen({
       </Text>
 
       {notice ? <StatusMessage tone="success" text={notice} /> : null}
-
-      <View style={styles.actions}>
-        <SecondaryButton label="Düzenle" onPress={onEdit} />
-        <DangerButton
-          disabled={isDeleting}
-          label={isDeleting ? "Siliniyor..." : "Sil"}
-          onPress={confirmDelete}
+      {item.image ? (
+        <Image
+          accessibilityLabel={`${item.name} fotoğrafı`}
+          resizeMode="cover"
+          source={{ uri: item.image.uri }}
+          style={styles.detailImage}
         />
+      ) : null}
+
+      <View style={styles.horizontalActions}>
+        <View style={styles.horizontalActionItem}>
+          <SecondaryButton label="Düzenle" onPress={onEdit} />
+        </View>
+        <View style={styles.horizontalActionItem}>
+          <DangerButton
+            disabled={isDeleting}
+            label={isDeleting ? "Siliniyor..." : "Sil"}
+            onPress={confirmDelete}
+          />
+        </View>
       </View>
 
       <View style={styles.detailGrid}>
@@ -718,10 +1094,6 @@ function ItemDetailScreen({
         <Detail label="Ana renk" value={item.primaryColor} />
         <Detail label="Marka" value={item.brand ?? "Marka belirtilmedi"} />
         <Detail label="Not" value={item.notes ?? "Not eklenmedi"} />
-        <Detail
-          label="Veri kaynağı"
-          value={item.dataSource === "manual" ? "Manuel" : "AI"}
-        />
         <Detail label="Son güncelleme" value={formatDateTime(item.updatedAt)} />
       </View>
     </ScrollView>
@@ -734,6 +1106,9 @@ function Field({
   placeholder,
   error,
   multiline,
+  keyboardType,
+  autoCapitalize,
+  secureTextEntry,
   onChangeText,
 }: {
   label: string;
@@ -741,6 +1116,9 @@ function Field({
   placeholder: string;
   error?: string;
   multiline?: boolean;
+  keyboardType?: KeyboardTypeOptions;
+  autoCapitalize?: "none" | "sentences" | "words" | "characters";
+  secureTextEntry?: boolean;
   onChangeText: (value: string) => void;
 }) {
   return (
@@ -748,9 +1126,12 @@ function Field({
       <Text style={styles.fieldLabel}>{label}</Text>
       <TextInput
         multiline={multiline}
+        autoCapitalize={autoCapitalize}
+        keyboardType={keyboardType}
         onChangeText={onChangeText}
         placeholder={placeholder}
         placeholderTextColor={colors.placeholder}
+        secureTextEntry={secureTextEntry}
         style={[styles.input, multiline && styles.multilineInput]}
         textAlignVertical={multiline ? "top" : "center"}
         value={value}
@@ -776,6 +1157,7 @@ function Button({
       onPress={onPress}
       style={({ pressed }) => [
         styles.button,
+        styles.actionButton,
         disabled && styles.disabled,
         pressed && !disabled && styles.pressed,
       ]}
@@ -785,12 +1167,26 @@ function Button({
   );
 }
 
-function SecondaryButton({ label, onPress }: { label: string; onPress: () => void }) {
+function SecondaryButton({
+  label,
+  onPress,
+  disabled,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
   return (
     <Pressable
       accessibilityRole="button"
+      disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.secondaryButton,
+        styles.actionButton,
+        disabled && styles.disabled,
+        pressed && !disabled && styles.pressed,
+      ]}
     >
       <Text style={styles.secondaryButtonText}>{label}</Text>
     </Pressable>
@@ -813,6 +1209,7 @@ function DangerButton({
       onPress={onPress}
       style={({ pressed }) => [
         styles.dangerButton,
+        styles.actionButton,
         disabled && styles.disabled,
         pressed && !disabled && styles.pressed,
       ]}
@@ -917,6 +1314,28 @@ function ChoiceRow({
   );
 }
 
+function SegmentButton({
+  label,
+  selected,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={[styles.segmentButton, selected && styles.selectedSegmentButton]}
+    >
+      <Text style={[styles.segmentText, selected && styles.selectedSegmentText]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.detail}>
@@ -955,6 +1374,9 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 6,
   },
+  actionButton: {
+    minWidth: 0,
+  },
   backButton: {
     alignSelf: "flex-start",
     marginBottom: 14,
@@ -979,8 +1401,8 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderRadius: 8,
     borderWidth: 1,
-    gap: 8,
-    padding: 16,
+    gap: 12,
+    padding: 14,
   },
   cardHeader: {
     alignItems: "flex-start",
@@ -995,15 +1417,16 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     color: colors.foreground,
+    flexShrink: 1,
     fontSize: 18,
     fontWeight: "700",
+    lineHeight: 23,
   },
   centerPanel: {
     alignItems: "center",
     flex: 1,
     gap: 14,
     justifyContent: "center",
-    maxWidth: 430,
     padding: 24,
     width: "100%",
   },
@@ -1053,6 +1476,14 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     textAlign: "center",
   },
+  countText: {
+    color: colors.muted,
+    flexShrink: 0,
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 18,
+    paddingTop: 12,
+  },
   dangerButton: {
     alignItems: "center",
     backgroundColor: colors.dangerSoft,
@@ -1075,14 +1506,26 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
   detail: {
+    borderBottomColor: colors.border,
+    borderBottomWidth: 1,
+    gap: 5,
+    paddingHorizontal: 2,
+    paddingVertical: 13,
+  },
+  detailGrid: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderRadius: 8,
     borderWidth: 1,
-    padding: 14,
+    paddingHorizontal: 14,
   },
-  detailGrid: {
-    gap: 10,
+  detailImage: {
+    aspectRatio: 4 / 3,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    width: "100%",
   },
   detailLabel: {
     color: colors.muted,
@@ -1132,6 +1575,15 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
+    minWidth: 0,
+  },
+  horizontalActions: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  horizontalActionItem: {
+    flex: 1,
+    minWidth: 0,
   },
   infoStatus: {
     backgroundColor: "#f7faf9",
@@ -1156,6 +1608,19 @@ const styles = StyleSheet.create({
   },
   list: {
     gap: 10,
+  },
+  loginHero: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 10,
+    padding: 18,
+  },
+  itemCardHeader: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    gap: 14,
   },
   metric: {
     backgroundColor: colors.surfaceMuted,
@@ -1185,16 +1650,31 @@ const styles = StyleSheet.create({
   pressed: {
     opacity: 0.75,
   },
+  photoActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  photoPreview: {
+    aspectRatio: 4 / 3,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    width: "100%",
+  },
+  photoPreviewPanel: {
+    gap: 10,
+  },
   safeArea: {
-    alignItems: "center",
     backgroundColor: colors.background,
     flex: 1,
   },
   screen: {
     backgroundColor: colors.background,
     gap: 16,
-    maxWidth: 430,
-    padding: 18,
+    paddingHorizontal: 20,
+    paddingTop: 18,
     paddingBottom: 32,
     width: "100%",
   },
@@ -1214,15 +1694,47 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
   },
-  sectionHeader: {
+  segmentButton: {
     alignItems: "center",
+    borderRadius: 7,
+    flex: 1,
+    justifyContent: "center",
+    minHeight: 42,
+    paddingHorizontal: 12,
+  },
+  segmentedControl: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
     flexDirection: "row",
+    gap: 4,
+    padding: 4,
+  },
+  segmentText: {
+    color: colors.muted,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  selectedSegmentButton: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+  },
+  selectedSegmentText: {
+    color: colors.foreground,
+  },
+  sectionHeader: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    gap: 10,
     justifyContent: "space-between",
   },
   sectionTitle: {
     color: colors.foreground,
-    fontSize: 20,
+    fontSize: 19,
     fontWeight: "800",
+    lineHeight: 24,
     marginTop: 8,
   },
   selectedChoice: {
@@ -1258,11 +1770,35 @@ const styles = StyleSheet.create({
     height: 14,
     width: 14,
   },
+  thumbnail: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 96,
+    width: 96,
+  },
   title: {
     color: colors.foreground,
-    fontSize: 34,
+    fontSize: 31,
     fontWeight: "800",
     letterSpacing: 0,
-    lineHeight: 39,
+    lineHeight: 37,
+  },
+  userBar: {
+    alignItems: "center",
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    padding: 12,
+  },
+  userName: {
+    color: colors.foreground,
+    fontSize: 16,
+    fontWeight: "800",
+    lineHeight: 22,
   },
 });

@@ -20,6 +20,13 @@
     },
     "plugins": [
       [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Kıyafet fotoğrafı çekmek için kamera erişimi gerekiyor.",
+          "photosPermission": "Kıyafet fotoğrafı seçmek için fotoğraf arşivi erişimi gerekiyor."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#f5f7f2",

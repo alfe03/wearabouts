@@ -46,6 +46,51 @@ async function writeState(state: StorageState) {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
+async function readStateForUser(userId: string) {
+  const state = await readState();
+  const wardrobeUserIds = new Map<string, string>();
+  let didMigrate = false;
+
+  const wardrobes = state.wardrobes.map((wardrobe) => {
+    const ownerId = wardrobe.userId ?? userId;
+    wardrobeUserIds.set(wardrobe.id, ownerId);
+
+    if (!wardrobe.userId) {
+      didMigrate = true;
+      return { ...wardrobe, userId: ownerId };
+    }
+
+    return wardrobe;
+  });
+
+  const clothingItems = state.clothingItems.map((item) => {
+    const ownerId = item.userId ?? wardrobeUserIds.get(item.wardrobeId) ?? userId;
+
+    if (!item.userId) {
+      didMigrate = true;
+      return { ...item, userId: ownerId };
+    }
+
+    return item;
+  });
+
+  if (didMigrate) {
+    await writeState({
+      ...state,
+      wardrobes,
+      clothingItems,
+    });
+
+    return {
+      ...state,
+      wardrobes,
+      clothingItems,
+    };
+  }
+
+  return state;
+}
+
 function createId(prefix: string) {
   const randomId =
     globalThis.crypto && "randomUUID" in globalThis.crypto
@@ -59,14 +104,11 @@ function timestamp() {
   return new Date().toISOString();
 }
 
-export async function listWardrobes() {
-  const state = await readState();
-  return sortByNewest(state.wardrobes);
-}
-
-export async function getWardrobe(id: string) {
-  const state = await readState();
-  return state.wardrobes.find((wardrobe) => wardrobe.id === id);
+export async function listWardrobes(userId: string) {
+  const state = await readStateForUser(userId);
+  return sortByNewest(
+    state.wardrobes.filter((wardrobe) => wardrobe.userId === userId),
+  );
 }
 
 export async function createWardrobeRecord(input: WardrobeInput) {
@@ -74,6 +116,7 @@ export async function createWardrobeRecord(input: WardrobeInput) {
   const now = timestamp();
   const wardrobe: Wardrobe = {
     id: createId("wardrobe"),
+    userId: input.userId,
     name: input.name,
     description: input.description,
     createdAt: now,
@@ -88,26 +131,16 @@ export async function createWardrobeRecord(input: WardrobeInput) {
   return wardrobe;
 }
 
-export async function listClothingItems() {
-  const state = await readState();
-  return sortByNewest(state.clothingItems);
+export async function listClothingItems(userId: string) {
+  const state = await readStateForUser(userId);
+  return sortByNewest(state.clothingItems.filter((item) => item.userId === userId));
 }
 
-export async function listClothingItemsByWardrobe(wardrobeId: string) {
-  const state = await readState();
-  return sortByNewest(
-    state.clothingItems.filter((item) => item.wardrobeId === wardrobeId),
+async function ensureWardrobeExists(userId: string, wardrobeId: string) {
+  const state = await readStateForUser(userId);
+  const wardrobe = state.wardrobes.find(
+    (record) => record.id === wardrobeId && record.userId === userId,
   );
-}
-
-export async function getClothingItem(id: string) {
-  const state = await readState();
-  return state.clothingItems.find((item) => item.id === id);
-}
-
-async function ensureWardrobeExists(wardrobeId: string) {
-  const state = await readState();
-  const wardrobe = state.wardrobes.find((record) => record.id === wardrobeId);
 
   if (!wardrobe) {
     throw new Error("Seçilen gardırop bulunamadı.");
@@ -117,10 +150,11 @@ async function ensureWardrobeExists(wardrobeId: string) {
 }
 
 export async function createClothingItemRecord(input: ClothingItemInput) {
-  const { state } = await ensureWardrobeExists(input.wardrobeId);
+  const { state } = await ensureWardrobeExists(input.userId, input.wardrobeId);
   const now = timestamp();
   const item: ClothingItem = {
     id: createId("item"),
+    userId: input.userId,
     wardrobeId: input.wardrobeId,
     name: input.name,
     category: input.category,
@@ -128,7 +162,8 @@ export async function createClothingItemRecord(input: ClothingItemInput) {
     primaryColor: input.primaryColor,
     brand: input.brand,
     notes: input.notes,
-    dataSource: "manual",
+    image: input.image,
+    dataSource: input.dataSource ?? "manual",
     createdAt: now,
     updatedAt: now,
   };
@@ -145,8 +180,10 @@ export async function updateClothingItemRecord(
   id: string,
   input: ClothingItemInput,
 ) {
-  const { state } = await ensureWardrobeExists(input.wardrobeId);
-  const existing = state.clothingItems.find((item) => item.id === id);
+  const { state } = await ensureWardrobeExists(input.userId, input.wardrobeId);
+  const existing = state.clothingItems.find(
+    (item) => item.id === id && item.userId === input.userId,
+  );
 
   if (!existing) {
     throw new Error("Kıyafet bulunamadı.");
@@ -168,10 +205,12 @@ export async function updateClothingItemRecord(
   return updated;
 }
 
-export async function deleteClothingItemRecord(id: string) {
+export async function deleteClothingItemRecord(userId: string, id: string) {
   const state = await readState();
   await writeState({
     ...state,
-    clothingItems: state.clothingItems.filter((item) => item.id !== id),
+    clothingItems: state.clothingItems.filter(
+      (item) => !(item.id === id && item.userId === userId),
+    ),
   });
 }

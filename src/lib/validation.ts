@@ -16,6 +16,40 @@ export const wardrobeFormSchema = z.object({
   description: optionalText,
 });
 
+const passwordSchema = z
+  .string()
+  .min(6, "Şifre en az 6 karakter olmalıdır.")
+  .max(80, "Şifre en fazla 80 karakter olabilir.");
+
+const emailSchema = z
+  .string()
+  .trim()
+  .min(1, "E-posta zorunludur.")
+  .email("Geçerli bir e-posta girin.")
+  .max(120, "E-posta en fazla 120 karakter olabilir.")
+  .transform((value) => value.toLowerCase());
+
+export const localUserRegistrationFormSchema = z
+  .object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "Ad zorunludur.")
+    .max(80, "Ad en fazla 80 karakter olabilir."),
+    email: emailSchema,
+    password: passwordSchema,
+    passwordConfirmation: z.string(),
+  })
+  .refine((value) => value.password === value.passwordConfirmation, {
+    message: "Şifreler eşleşmelidir.",
+    path: ["passwordConfirmation"],
+  });
+
+export const localUserLoginFormSchema = z.object({
+  email: emailSchema,
+  password: passwordSchema,
+});
+
 export const clothingItemFormSchema = z.object({
   wardrobeId: z.string().trim().min(1, "Bulunduğu gardırop seçilmelidir."),
   name: z

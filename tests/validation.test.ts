@@ -5,7 +5,12 @@ import {
   sortByNewest,
 } from "../src/lib/data-utils";
 import type { ClothingItem } from "../src/lib/types";
-import { clothingItemFormSchema, wardrobeFormSchema } from "../src/lib/validation";
+import {
+  clothingItemFormSchema,
+  localUserLoginFormSchema,
+  localUserRegistrationFormSchema,
+  wardrobeFormSchema,
+} from "../src/lib/validation";
 
 describe("form doğrulama", () => {
   it("gardırop adını zorunlu tutar", () => {
@@ -34,6 +39,34 @@ describe("form doğrulama", () => {
       expect(result.data.notes).toBeUndefined();
     }
   });
+
+  it("yerel kullanıcı girişini doğrular ve e-postayı normalize eder", () => {
+    const result = localUserRegistrationFormSchema.safeParse({
+      name: " Cemil ",
+      email: " CEMIL@EXAMPLE.COM ",
+      password: "123456",
+      passwordConfirmation: "123456",
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.name).toBe("Cemil");
+      expect(result.data.email).toBe("cemil@example.com");
+    }
+
+    expect(
+      localUserLoginFormSchema.safeParse({ email: "yanlış", password: "123456" })
+        .success,
+    ).toBe(false);
+    expect(
+      localUserRegistrationFormSchema.safeParse({
+        name: "Cemil",
+        email: "cemil@example.com",
+        password: "123456",
+        passwordConfirmation: "abcdef",
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("veri yardımcıları", () => {
@@ -46,6 +79,7 @@ describe("veri yardımcıları", () => {
     const items: ClothingItem[] = [
       {
         id: "item_1",
+        userId: "user_1",
         wardrobeId: "wardrobe_1",
         name: "Pantolon",
         category: "Alt giyim",
@@ -57,6 +91,7 @@ describe("veri yardımcıları", () => {
       },
       {
         id: "item_2",
+        userId: "user_1",
         wardrobeId: "wardrobe_1",
         name: "Ayakkabı",
         category: "Ayakkabı",
